@@ -18,6 +18,15 @@
 | Go | [go](go) | Go 1.21 以上，只用標準函式庫 |
 | C# | [csharp](csharp) | .NET 8 以上 |
 | Java | [java](java) | Java 17 以上，只用 JDK 內建的 HttpClient |
+| Kotlin | [kotlin](kotlin) | Kotlin 1.9 以上，JVM 17 以上 |
+| Rust | [rust](rust) | Rust 1.70 以上，reqwest、serde_json |
+| C | [c](c) | C99、libcurl |
+| C++ | [cpp](cpp) | C++17、libcurl、nlohmann/json、CMake |
+| PHP | [php](php) | PHP 8.1 以上、curl 擴充功能 |
+| Ruby | [ruby](ruby) | Ruby 3.0 以上，只用標準函式庫 |
+| Swift | [swift](swift) | Swift 5.7 以上，只用 Foundation |
+| PowerShell | [powershell](powershell) | PowerShell 7 以上 |
+| R | [r](r) | R 4.1 以上、httr2 |
 
 ## 設定
 

@@ -10,3 +10,8 @@ go/sample
 go/sample.exe
 __pycache__/
 node_modules/
+rust/target/
+cpp/build/
+c/example
+c/example.exe
+kotlin/*.jar
