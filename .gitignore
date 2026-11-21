@@ -1,0 +1,12 @@
+# 憑證請放在環境變數，不要 commit
+.env
+.env.*
+
+# 編譯產物
+csharp/bin/
+csharp/obj/
+*.class
+go/sample
+go/sample.exe
+__pycache__/
+node_modules/
