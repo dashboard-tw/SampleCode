@@ -69,6 +69,26 @@ grant_type=client_credentials&client_id=<Client Id>&client_secret=<Client Secret
 
 流量以回應內容的大小計算。定時查詢最新資料時，請記下回應的 `ETag`，下次帶上 `If-None-Match` 標頭。資料沒變會回應 `304`，不帶內容。304 一樣算一次，但不算流量。
 
+應用上架到 [應用活化](https://dashboard.tw/showcase/app) 後，帳號會自動改用合作額度：每天 3,000 次、1.5 GB 流量，每分鐘 60 次。名下已沒有上架中的應用時，例如應用被下架或刪除，額度會自動恢復為一般額度。
+
+## 用 AI 工具連接（MCP）
+
+Claude、Claude Code、ChatGPT、Cursor、Windsurf、VS Code、Cline 等支援 MCP 的 AI 工具，可以直接查詢 dashboard.tw 的資料與 API 文件，不用寫程式。
+
+在 AI 工具新增 MCP 伺服器，填入網址 `https://dashboard.tw/mcp`，按下連接後登入 dashboard.tw 並授權即可。以 Claude Code 為例：
+
+```bash
+claude mcp add --transport http dashboard-tw https://dashboard.tw/mcp
+```
+
+不支援登入授權的工具，可以把 API 憑證直接放在標頭：
+
+```http
+Authorization: Bearer <Client Id>:<Client Secret>
+```
+
+獲取資料的工具會跟 API 共用每日額度，搜尋與文件類工具不算額度。各工具的設定方式見 <https://dashboard.tw/developers/mcp>。
+
 ## 更多資訊
 
 - API 文件：<https://dashboard.tw/developers>
