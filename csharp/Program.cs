@@ -1,8 +1,8 @@
 // dashboard.tw 開放資料 API：C#（.NET 8 以上）範例。
 //
 // 用法：
-//   set DASHBOARD_TW_CLIENT_ID=1a2b3c4d-xxxx-xxxx-xxxx
-//   set DASHBOARD_TW_CLIENT_SECRET=...
+//   export DASHBOARD_TW_CLIENT_ID=1a2b3c4d-xxxx-xxxx-xxxx
+//   export DASHBOARD_TW_CLIENT_SECRET=...
 //   dotnet run
 
 using System.Net;
@@ -15,14 +15,18 @@ var api = new DashboardTW(
     Environment.GetEnvironmentVariable("DASHBOARD_TW_CLIENT_ID") ?? "",
     Environment.GetEnvironmentVariable("DASHBOARD_TW_CLIENT_SECRET") ?? "");
 
-using var body = await api.GetAsync("/datasets/aqi_obs/latest?county=63000");
-var root = body.RootElement;
+var (body, etag) = await api.GetAsync("/datasets/aqi_obs/latest?county=63000");
+var root = body!.RootElement;
 Console.WriteLine($"資料來源：{root.GetProperty("meta").GetProperty("source").GetProperty("agency").GetString()}");
 foreach (var row in root.GetProperty("data").EnumerateArray())
 {
     var aqi = row.GetProperty("aqi").ValueKind == JsonValueKind.Null ? "—" : row.GetProperty("aqi").ToString();
     Console.WriteLine($"測站 {row.GetProperty("site_id")}\tAQI {aqi}\t{row.GetProperty("status").GetString()}");
 }
+
+// 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+var (again, _) = await api.GetAsync("/datasets/aqi_obs/latest?county=63000", etag);
+Console.WriteLine(again is null ? "資料沒有變動（304）" : "資料已更新");
 
 /// <summary>取得並快取 Access Token，token 快到期或失效時自動重新取得。</summary>
 class DashboardTW(string baseUrl, string clientId, string clientSecret)
@@ -65,13 +69,23 @@ class DashboardTW(string baseUrl, string clientId, string clientSecret)
         }
     }
 
-    public async Task<JsonDocument> GetAsync(string pathAndQuery)
+    /// <summary>呼叫 API，回傳 JSON 本文與 ETag。帶上 etag 且資料沒變時，本文是 null。</summary>
+    public async Task<(JsonDocument? Body, string? ETag)> GetAsync(string pathAndQuery, string? etag = null)
     {
         for (var attempt = 0; attempt < 2; attempt++)
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, $"{baseUrl}/api/v1{pathAndQuery}");
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await TokenAsync());
+            if (etag is not null)
+            {
+                req.Headers.TryAddWithoutValidation("If-None-Match", etag);
+            }
             using var res = await http.SendAsync(req);
+            // 資料沒變：304 不帶內容，也不算流量
+            if (res.StatusCode == HttpStatusCode.NotModified)
+            {
+                return (null, etag);
+            }
             // token 失效（例如憑證重新產生 Secret）：重新取得後再試一次
             if (res.StatusCode == HttpStatusCode.Unauthorized && attempt == 0)
             {
@@ -83,7 +97,7 @@ class DashboardTW(string baseUrl, string clientId, string clientSecret)
             {
                 throw new HttpRequestException($"API 錯誤：{(int)res.StatusCode} {text}");
             }
-            return JsonDocument.Parse(text);
+            return (JsonDocument.Parse(text), res.Headers.ETag?.ToString());
         }
         throw new HttpRequestException("API 錯誤：token 無效");
     }

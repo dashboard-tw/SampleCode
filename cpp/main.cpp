@@ -28,21 +28,38 @@ size_t collect(char* ptr, size_t size, size_t nmemb, void* userdata) {
 struct Response {
     long status = 0;
     std::string body;
+    std::string etag;
 };
+
+// 從回應標頭取出 ETag。
+size_t onHeader(char* line, size_t size, size_t nitems, void* userdata) {
+    std::string h(line, size * nitems);
+    if (h.size() > 5 && (h[0] | 0x20) == 'e' && (h[1] | 0x20) == 't' && (h[2] | 0x20) == 'a' &&
+        (h[3] | 0x20) == 'g' && h[4] == ':') {
+        std::string v = h.substr(5);
+        v.erase(0, v.find_first_not_of(" \t"));
+        v.erase(v.find_last_not_of(" \r\n") + 1);
+        static_cast<Response*>(userdata)->etag = v;
+    }
+    return size * nitems;
+}
 
 // 送出一個請求。form 有值時用 POST（application/x-www-form-urlencoded）。
 Response request(const std::string& url, const std::optional<std::string>& form,
-                 const std::optional<std::string>& bearer) {
+                 const std::optional<std::string>& bearer, const std::optional<std::string>& etag = std::nullopt) {
     CURL* curl = curl_easy_init();
     if (!curl) throw std::runtime_error("curl_easy_init 失敗");
     Response res;
     curl_slist* headers = nullptr;
     if (bearer) headers = curl_slist_append(headers, ("Authorization: Bearer " + *bearer).c_str());
+    if (etag) headers = curl_slist_append(headers, ("If-None-Match: " + *etag).c_str());
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     if (form) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, form->c_str());
     if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, collect);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &res.body);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, onHeader);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &res);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     CURLcode rc = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &res.status);
@@ -67,16 +84,26 @@ public:
     DashboardTW(std::string base, std::string id, std::string secret)
         : base_(std::move(base)), id_(std::move(id)), secret_(std::move(secret)) {}
 
-    json get(const std::string& path_and_query) {
+    // 呼叫 API。etag 有值且資料沒變時，回應 304，body 是 std::nullopt。
+    struct Result {
+        std::optional<json> body;
+        std::optional<std::string> etag;
+    };
+
+    Result get(const std::string& path_and_query, const std::optional<std::string>& etag = std::nullopt) {
         for (int attempt = 0; attempt < 2; ++attempt) {
-            Response res = request(base_ + "/api/v1" + path_and_query, std::nullopt, token());
+            Response res = request(base_ + "/api/v1" + path_and_query, std::nullopt, token(), etag);
+            // 資料沒變：304 不帶內容，也不算流量
+            if (res.status == 304) return {std::nullopt, etag};
             // token 失效（例如憑證重新產生 Secret）：重新取得後再試一次
             if (res.status == 401 && attempt == 0) {
                 token_.reset();
                 continue;
             }
             if (res.status != 200) throw std::runtime_error("API 錯誤：" + std::to_string(res.status) + " " + res.body);
-            return json::parse(res.body);
+            std::optional<std::string> tag;
+            if (!res.etag.empty()) tag = res.etag;
+            return {json::parse(res.body), tag};
         }
         throw std::runtime_error("API 錯誤：token 無效");
     }
@@ -119,12 +146,18 @@ int main() {
         while (!base.empty() && base.back() == '/') base.pop_back();
         DashboardTW api(base, env("DASHBOARD_TW_CLIENT_ID"), env("DASHBOARD_TW_CLIENT_SECRET"));
 
-        json body = api.get("/datasets/aqi_obs/latest?county=63000");
+        const std::string path = "/datasets/aqi_obs/latest?county=63000";
+        auto first = api.get(path);
+        json& body = *first.body;
         std::cout << "資料來源：" << body["meta"]["source"]["agency"].get<std::string>() << "\n";
         for (const auto& row : body["data"]) {
             std::cout << "測站 " << row["site_id"] << "\tAQI " << row["aqi"] << "\t"
                       << row.value("status", "") << "\n";
         }
+
+        // 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+        auto again = api.get(path, first.etag);
+        std::cout << (again.body ? "資料已更新" : "資料沒有變動（304）") << "\n";
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         curl_global_cleanup();

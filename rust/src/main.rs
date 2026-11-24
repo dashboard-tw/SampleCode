@@ -9,6 +9,7 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client as Http;
+use reqwest::header::{ETAG, IF_NONE_MATCH};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
@@ -61,12 +62,24 @@ impl DashboardTw {
         }
     }
 
-    /// 呼叫 API，回傳 JSON。
-    fn get(&mut self, path_and_query: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    /// 呼叫 API，回傳 (JSON, ETag)。帶上 etag 且資料沒變時，JSON 是 None。
+    fn get(
+        &mut self,
+        path_and_query: &str,
+        etag: Option<&str>,
+    ) -> Result<(Option<Value>, Option<String>), Box<dyn std::error::Error>> {
         let url = format!("{}/api/v1{}", self.base_url, path_and_query);
         for attempt in 0..2 {
             let token = self.token()?;
-            let res = self.http.get(&url).bearer_auth(token).send()?;
+            let mut req = self.http.get(&url).bearer_auth(token);
+            if let Some(tag) = etag {
+                req = req.header(IF_NONE_MATCH, tag);
+            }
+            let res = req.send()?;
+            // 資料沒變：304 不帶內容，也不算流量
+            if res.status() == StatusCode::NOT_MODIFIED {
+                return Ok((None, etag.map(String::from)));
+            }
             // token 失效（例如憑證重新產生 Secret）：重新取得後再試一次
             if res.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
                 self.token = None;
@@ -75,7 +88,8 @@ impl DashboardTw {
             if !res.status().is_success() {
                 return Err(format!("API 錯誤：{} {}", res.status(), res.text()?).into());
             }
-            return Ok(res.json()?);
+            let tag = res.headers().get(ETAG).and_then(|v| v.to_str().ok()).map(String::from);
+            return Ok((Some(res.json()?), tag));
         }
         Err("API 錯誤：token 無效".into())
     }
@@ -89,10 +103,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("DASHBOARD_TW_CLIENT_SECRET")?,
     );
 
-    let body = api.get("/datasets/aqi_obs/latest?county=63000")?;
+    let path = "/datasets/aqi_obs/latest?county=63000";
+    let (body, etag) = api.get(path, None)?;
+    let body = body.unwrap_or_default();
     println!("資料來源：{}", body["meta"]["source"]["agency"].as_str().unwrap_or(""));
     for row in body["data"].as_array().into_iter().flatten() {
         println!("測站 {}\tAQI {}\t{}", row["site_id"], row["aqi"], row["status"].as_str().unwrap_or(""));
     }
+
+    // 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+    let (again, _) = api.get(path, etag.as_deref())?;
+    println!("{}", if again.is_none() { "資料沒有變動（304）" } else { "資料已更新" });
     Ok(())
 }

@@ -6,6 +6,8 @@
     python example.py
 """
 
+from __future__ import annotations
+
 import json
 import os
 import time
@@ -14,6 +16,8 @@ import urllib.parse
 import urllib.request
 
 BASE_URL = os.environ.get("DASHBOARD_TW_BASE_URL", "https://dashboard.tw").rstrip("/")
+# 有些防火牆會擋 Python 預設的 User-Agent，請換成能代表你程式的名稱
+USER_AGENT = "dashboard-tw-sample/1.0"
 
 
 class DashboardTW:
@@ -37,7 +41,7 @@ class DashboardTW:
         req = urllib.request.Request(
             f"{self.base_url}/api/v1/auth/token",
             data=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": USER_AGENT},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=30) as res:
@@ -52,16 +56,23 @@ class DashboardTW:
             return self._fetch_token()
         return self._token
 
-    def get(self, path: str, params: dict | None = None) -> dict:
+    def get(self, path: str, params: dict | None = None, etag: str | None = None) -> tuple[dict | None, str | None]:
+        """呼叫 API，回傳 (JSON 本文, ETag)。帶上 etag 且資料沒變時，本文是 None。"""
         url = f"{self.base_url}/api/v1{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
         for attempt in range(2):
-            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token()}"})
+            headers = {"Authorization": f"Bearer {self.token()}", "User-Agent": USER_AGENT}
+            if etag:
+                headers["If-None-Match"] = etag
+            req = urllib.request.Request(url, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=30) as res:
-                    return json.load(res)
+                    return json.load(res), res.headers.get("ETag")
             except urllib.error.HTTPError as e:
+                # 資料沒變：304 不帶內容，也不算流量
+                if e.code == 304:
+                    return None, etag
                 # token 失效（例如憑證重新產生 Secret）：重新取得後再試一次
                 if e.code == 401 and attempt == 0:
                     self._token = None
@@ -72,10 +83,14 @@ class DashboardTW:
 
 def main() -> None:
     api = DashboardTW(os.environ["DASHBOARD_TW_CLIENT_ID"], os.environ["DASHBOARD_TW_CLIENT_SECRET"])
-    body = api.get("/datasets/aqi_obs/latest", {"county": "63000"})
+    body, etag = api.get("/datasets/aqi_obs/latest", {"county": "63000"})
     print("資料來源：", body["meta"]["source"]["agency"])
     for row in body["data"]:
-        print(f"測站 {row['site_id']}\tAQI {row['aqi']}\t{row['status']}")
+        print(f"測站 {row['site_id']}	AQI {row['aqi']}	{row['status']}")
+
+    # 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+    again, etag = api.get("/datasets/aqi_obs/latest", {"county": "63000"}, etag=etag)
+    print("資料沒有變動（304）" if again is None else "資料已更新")
 
 
 if __name__ == "__main__":

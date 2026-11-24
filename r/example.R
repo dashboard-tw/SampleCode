@@ -19,14 +19,22 @@ client <- oauth_client(
   auth = "body"
 )
 
-body <- request(base_url) |>
-  req_url_path_append("api", "v1", "datasets", "aqi_obs", "latest") |>
-  req_url_query(county = "63000") |>
-  req_oauth_client_credentials(client) |>
-  req_perform() |>
-  resp_body_json()
+latest <- function(etag = NULL) {
+  req <- request(base_url) |>
+    req_url_path_append("api", "v1", "datasets", "aqi_obs", "latest") |>
+    req_url_query(county = "63000") |>
+    req_oauth_client_credentials(client)
+  if (!is.null(etag)) req <- req_headers(req, `If-None-Match` = etag)
+  req_perform(req)
+}
 
+resp <- latest()
+body <- resp_body_json(resp)
 cat("資料來源：", body$meta$source$agency, "\n")
 for (row in body$data) {
   cat("測站", row$site_id, "\tAQI", row$aqi, "\t", row$status, "\n")
 }
+
+# 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+again <- latest(resp_header(resp, "ETag"))
+cat(if (resp_status(again) == 304) "資料沒有變動（304）" else "資料已更新", "\n")

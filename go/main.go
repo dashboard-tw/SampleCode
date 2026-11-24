@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -70,8 +71,9 @@ func (c *Client) Token() (string, error) {
 	return c.token, nil
 }
 
-// Get 呼叫 API，回傳 JSON 本文。
-func (c *Client) Get(path string, params url.Values, out any) error {
+// Get 呼叫 API，把 JSON 本文解析到 out，回傳回應的 ETag。
+// 帶上 etag 且資料沒變時回傳 ErrNotModified，out 不會被改動。
+func (c *Client) Get(path string, params url.Values, etag string, out any) (string, error) {
 	u := c.BaseURL + "/api/v1" + path
 	if len(params) > 0 {
 		u += "?" + params.Encode()
@@ -79,18 +81,25 @@ func (c *Client) Get(path string, params url.Values, out any) error {
 	for attempt := 0; attempt < 2; attempt++ {
 		token, err := c.Token()
 		if err != nil {
-			return err
+			return "", err
 		}
 		req, _ := http.NewRequest(http.MethodGet, u, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
 		res, err := c.HTTP.Do(req)
 		if err != nil {
-			return err
+			return "", err
 		}
 		body, err := io.ReadAll(res.Body)
 		res.Body.Close()
 		if err != nil {
-			return err
+			return "", err
+		}
+		// 資料沒變：304 不帶內容，也不算流量
+		if res.StatusCode == http.StatusNotModified {
+			return etag, ErrNotModified
 		}
 		// token 失效（例如憑證重新產生 Secret）：重新取得後再試一次
 		if res.StatusCode == http.StatusUnauthorized && attempt == 0 {
@@ -100,12 +109,15 @@ func (c *Client) Get(path string, params url.Values, out any) error {
 			continue
 		}
 		if res.StatusCode != http.StatusOK {
-			return fmt.Errorf("API 錯誤：%d %s", res.StatusCode, body)
+			return "", fmt.Errorf("API 錯誤：%d %s", res.StatusCode, body)
 		}
-		return json.Unmarshal(body, out)
+		return res.Header.Get("ETag"), json.Unmarshal(body, out)
 	}
-	return fmt.Errorf("API 錯誤：token 無效")
+	return "", fmt.Errorf("API 錯誤：token 無效")
 }
+
+// ErrNotModified 表示資料跟上次相同（304）。
+var ErrNotModified = errors.New("not modified")
 
 func main() {
 	base := os.Getenv("DASHBOARD_TW_BASE_URL")
@@ -131,7 +143,9 @@ func main() {
 			} `json:"source"`
 		} `json:"meta"`
 	}
-	if err := api.Get("/datasets/aqi_obs/latest", url.Values{"county": {"63000"}}, &body); err != nil {
+	query := url.Values{"county": {"63000"}}
+	etag, err := api.Get("/datasets/aqi_obs/latest", query, "", &body)
+	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("資料來源：", body.Meta.Source.Agency)
@@ -141,5 +155,14 @@ func main() {
 			aqi = fmt.Sprint(*row.AQI)
 		}
 		fmt.Printf("測站 %d\tAQI %s\t%s\n", row.SiteID, aqi, row.Status)
+	}
+
+	// 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+	if _, err := api.Get("/datasets/aqi_obs/latest", query, etag, &body); errors.Is(err, ErrNotModified) {
+		fmt.Println("資料沒有變動（304）")
+	} else if err != nil {
+		log.Fatal(err)
+	} else {
+		fmt.Println("資料已更新")
 	}
 }

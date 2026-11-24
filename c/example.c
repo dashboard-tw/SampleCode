@@ -53,6 +53,32 @@ static long json_number(const char *json, const char *key) {
     return start ? strtol(start + strlen(pattern), NULL, 10) : 0;
 }
 
+/* 從回應標頭取出 ETag。 */
+struct etag_out {
+    char *buf;
+    size_t size;
+};
+
+static size_t on_header(char *line, size_t size, size_t nitems, void *userdata) {
+    size_t n = size * nitems;
+    struct etag_out *out = userdata;
+    const char *name = "etag:";
+    if (out->buf && n > 5) {
+        size_t i = 0;
+        while (i < 5 && (line[i] | 0x20) == name[i]) i++;
+        if (i == 5) {
+            size_t start = 5, end = n;
+            while (start < end && (line[start] == ' ' || line[start] == '\t')) start++;
+            while (end > start && (line[end - 1] == '\r' || line[end - 1] == '\n' || line[end - 1] == ' ')) end--;
+            if (end - start < out->size) {
+                memcpy(out->buf, line + start, end - start);
+                out->buf[end - start] = '\0';
+            }
+        }
+    }
+    return n;
+}
+
 static char token[256];
 static time_t token_expires;
 
@@ -90,10 +116,16 @@ static int fetch_token(const char *base, const char *id, const char *secret) {
     return ok;
 }
 
-/* 呼叫 API，成功時回傳 JSON 本文（呼叫端負責 free），失敗回傳 NULL。 */
-static char *api_get(const char *base, const char *id, const char *secret, const char *path) {
-    char url[512], auth[300];
+/*
+ * 呼叫 API，成功時回傳 JSON 本文（呼叫端負責 free），失敗回傳 NULL。
+ * etag 有值時帶上 If-None-Match；資料沒變時回應 304，回傳 NULL 並把 *not_modified 設為 1。
+ * etag_out 有值時寫入回應的 ETag。
+ */
+static char *api_get(const char *base, const char *id, const char *secret, const char *path, const char *etag,
+                     char *etag_out, size_t etag_out_size, int *not_modified) {
+    char url[512], auth[300], match[200];
     snprintf(url, sizeof url, "%s/api/v1%s", base, path);
+    *not_modified = 0;
     for (int attempt = 0; attempt < 2; attempt++) {
         if (token[0] == '\0' || time(NULL) >= token_expires) {
             if (!fetch_token(base, id, secret)) return NULL;
@@ -103,18 +135,31 @@ static char *api_get(const char *base, const char *id, const char *secret, const
         struct curl_slist *headers = NULL;
         snprintf(auth, sizeof auth, "Authorization: Bearer %s", token);
         headers = curl_slist_append(headers, auth);
+        if (etag && etag[0]) {
+            snprintf(match, sizeof match, "If-None-Match: %s", etag);
+            headers = curl_slist_append(headers, match);
+        }
         struct buffer body = {0};
+        struct etag_out tag = {etag_out, etag_out_size};
         long status = 0;
         curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, collect);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, on_header);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &tag);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
         CURLcode rc = curl_easy_perform(curl);
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
 
+        /* 資料沒變：304 不帶內容，也不算流量 */
+        if (rc == CURLE_OK && status == 304) {
+            *not_modified = 1;
+            free(body.data);
+            return NULL;
+        }
         /* token 失效（例如憑證重新產生 Secret）：重新取得後再試一次 */
         if (rc == CURLE_OK && status == 401 && attempt == 0) {
             token[0] = '\0';
@@ -141,11 +186,25 @@ int main(void) {
         return 1;
     }
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    char *body = api_get(base, id, secret, "/datasets/aqi_obs/latest?county=63000");
-    if (body) {
-        puts(body);
-        free(body);
+    const char *path = "/datasets/aqi_obs/latest?county=63000";
+    char etag[128] = "";
+    int not_modified = 0;
+    char *body = api_get(base, id, secret, path, NULL, etag, sizeof etag, &not_modified);
+    if (!body) {
+        curl_global_cleanup();
+        return 1;
+    }
+    puts(body);
+    free(body);
+
+    /* 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量 */
+    char *again = api_get(base, id, secret, path, etag, NULL, 0, &not_modified);
+    if (not_modified) {
+        puts("資料沒有變動（304）");
+    } else if (again) {
+        puts("資料已更新");
+        free(again);
     }
     curl_global_cleanup();
-    return body ? 0 : 1;
+    return 0;
 }

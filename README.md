@@ -6,7 +6,7 @@
 2. 以 Client Id 與 Client Secret 向 `POST /api/v1/auth/token` 換取 **Access Token**（有效 24 小時）。
 3. 呼叫 API 時在標頭帶上 `Authorization: Bearer <Access Token>`。
 
-每個範例都會：取得 token、在 token 快到期前重複使用、收到 `401` 時重新取得一次，再呼叫「臺北市各空品測站的最新 AQI」。
+每個範例都會：取得 token、在 token 快到期前重複使用、收到 `401` 時重新取得一次，再呼叫「臺北市各空品測站的最新 AQI」。最後帶上回應的 `ETag` 再查一次，資料沒變時會收到 `304`，示範如何節省流量。
 
 ## 範例
 
@@ -37,14 +37,9 @@ export DASHBOARD_TW_CLIENT_ID="1a2b3c4d-xxxx-xxxx-xxxx"
 export DASHBOARD_TW_CLIENT_SECRET="..."
 ```
 
-Windows PowerShell：
-
-```powershell
-$env:DASHBOARD_TW_CLIENT_ID = "1a2b3c4d-xxxx-xxxx-xxxx"
-$env:DASHBOARD_TW_CLIENT_SECRET = "..."
-```
-
 `DASHBOARD_TW_BASE_URL` 可以改連其他伺服器，預設是 `https://dashboard.tw`。
+
+請在請求帶上能代表你程式的 `User-Agent`。Python 內建的 `Python-urllib` 會被網站防火牆擋下，回應 `403`，Python 範例已經改成自訂的名稱。
 
 ## 取得 Access Token
 
@@ -88,6 +83,15 @@ Authorization: Bearer <Client Id>:<Client Secret>
 ```
 
 獲取資料的工具會跟 API 共用每日額度，搜尋與文件類工具不算額度。各工具的設定方式見 <https://dashboard.tw/developers/mcp>。
+
+自己寫程式連 MCP 伺服器的範例：
+
+| 語言 | 資料夾 | 需求 |
+|---|---|---|
+| Python | [mcp/python](mcp/python) | Python 3.9 以上，只用標準函式庫 |
+| JavaScript | [mcp/javascript](mcp/javascript) | Node.js 18 以上，只用內建的 fetch |
+
+範例會用 API 憑證連線、列出工具，再用 `list_sites` 查出石門水庫的代碼，用 `get_latest` 取得最新水情。範例直接送 JSON-RPC，方便看懂 MCP 的運作方式。正式專案建議用官方的 MCP SDK：Python 是 `mcp`，JavaScript 是 `@modelcontextprotocol/sdk`。
 
 ## 更多資訊
 

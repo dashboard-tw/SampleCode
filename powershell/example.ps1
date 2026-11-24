@@ -28,24 +28,32 @@ function Get-DashboardToken {
     return $script:Token
 }
 
-# 呼叫 API；token 失效時重新取得一次再試
-function Invoke-DashboardApi([string]$PathAndQuery) {
+# 呼叫 API，回傳 @{ Body; ETag }。帶上 ETag 且資料沒變時，Body 是 $null。
+# token 失效時重新取得一次再試。
+function Invoke-DashboardApi([string]$PathAndQuery, [string]$ETag) {
     for ($attempt = 0; $attempt -lt 2; $attempt++) {
-        try {
-            return Invoke-RestMethod -Uri "$BaseUrl/api/v1$PathAndQuery" `
-                -Headers @{ Authorization = "Bearer $(Get-DashboardToken)" }
-        } catch {
-            if ($_.Exception.Response.StatusCode.value__ -eq 401 -and $attempt -eq 0) {
-                $script:Token = $null
-                continue
-            }
-            throw
+        $headers = @{ Authorization = "Bearer $(Get-DashboardToken)" }
+        if ($ETag) { $headers['If-None-Match'] = $ETag }
+        $res = Invoke-WebRequest -Uri "$BaseUrl/api/v1$PathAndQuery" -Headers $headers -SkipHttpErrorCheck
+        # 資料沒變：304 不帶內容，也不算流量
+        if ($res.StatusCode -eq 304) { return @{ Body = $null; ETag = $ETag } }
+        # token 失效（例如憑證重新產生 Secret）：重新取得後再試一次
+        if ($res.StatusCode -eq 401 -and $attempt -eq 0) {
+            $script:Token = $null
+            continue
         }
+        if ($res.StatusCode -ne 200) { throw "API 錯誤：$($res.StatusCode) $($res.Content)" }
+        return @{ Body = ($res.Content | ConvertFrom-Json); ETag = "$($res.Headers['ETag'])" }
     }
 }
 
-$body = Invoke-DashboardApi '/datasets/aqi_obs/latest?county=63000'
-"資料來源：$($body.meta.source.agency)"
-foreach ($row in $body.data) {
+$path = '/datasets/aqi_obs/latest?county=63000'
+$first = Invoke-DashboardApi $path
+"資料來源：$($first.Body.meta.source.agency)"
+foreach ($row in $first.Body.data) {
     "測站 $($row.site_id)`tAQI $($row.aqi)`t$($row.status)"
 }
+
+# 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+$again = Invoke-DashboardApi $path $first.ETag
+if ($null -eq $again.Body) { '資料沒有變動（304）' } else { '資料已更新' }

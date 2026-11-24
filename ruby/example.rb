@@ -26,13 +26,18 @@ class DashboardTW
     @token
   end
 
-  def get(path, params = {})
+  # 呼叫 API，回傳 [JSON 本文, ETag]。帶上 etag 且資料沒變時，本文是 nil。
+  def get(path, params = {}, etag: nil)
     uri = URI("#{@base_url}/api/v1#{path}")
     uri.query = URI.encode_www_form(params) unless params.empty?
     2.times do |attempt|
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{token}"
+      req['If-None-Match'] = etag if etag
       res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) { |h| h.request(req) }
+      # 資料沒變：304 不帶內容，也不算流量
+      return [nil, etag] if res.code == '304'
+
       # token 失效（例如憑證重新產生 Secret）：重新取得後再試一次
       if res.code == '401' && attempt.zero?
         @token = nil
@@ -40,7 +45,7 @@ class DashboardTW
       end
       raise "API 錯誤：#{res.code} #{res.body}" unless res.code == '200'
 
-      return JSON.parse(res.body)
+      return [JSON.parse(res.body), res['ETag']]
     end
     raise 'API 錯誤：token 無效'
   end
@@ -62,6 +67,10 @@ class DashboardTW
 end
 
 api = DashboardTW.new(ENV.fetch('DASHBOARD_TW_CLIENT_ID'), ENV.fetch('DASHBOARD_TW_CLIENT_SECRET'))
-body = api.get('/datasets/aqi_obs/latest', county: '63000')
+body, etag = api.get('/datasets/aqi_obs/latest', county: '63000')
 puts "資料來源：#{body.dig('meta', 'source', 'agency')}"
 body['data'].each { |row| puts "測站 #{row['site_id']}\tAQI #{row['aqi']}\t#{row['status']}" }
+
+# 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+again, = api.get('/datasets/aqi_obs/latest', { county: '63000' }, etag: etag)
+puts again.nil? ? '資料沒有變動（304）' : '資料已更新'

@@ -77,14 +77,24 @@ public class DashboardTW {
         return token;
     }
 
-    /** 呼叫 API，回傳 JSON 本文。 */
-    public String get(String pathAndQuery) throws Exception {
+    /** API 回應：本文與 ETag。帶上 ETag 且資料沒變時，本文是 null。 */
+    public record Result(String body, String etag) {
+    }
+
+    /** 呼叫 API。etag 可以是 null；有值且資料沒變時，回應 304，本文是 null。 */
+    public Result get(String pathAndQuery, String etag) throws Exception {
         for (int attempt = 0; attempt < 2; attempt++) {
-            HttpRequest req = HttpRequest.newBuilder(URI.create(baseUrl + "/api/v1" + pathAndQuery))
+            HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(baseUrl + "/api/v1" + pathAndQuery))
                     .header("Authorization", "Bearer " + token())
-                    .GET()
-                    .build();
-            HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
+                    .GET();
+            if (etag != null) {
+                builder.header("If-None-Match", etag);
+            }
+            HttpResponse<String> res = http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+            // 資料沒變：304 不帶內容，也不算流量
+            if (res.statusCode() == 304) {
+                return new Result(null, etag);
+            }
             // token 失效（例如憑證重新產生 Secret）：重新取得後再試一次
             if (res.statusCode() == 401 && attempt == 0) {
                 synchronized (this) {
@@ -95,7 +105,7 @@ public class DashboardTW {
             if (res.statusCode() != 200) {
                 throw new IllegalStateException("API 錯誤：" + res.statusCode() + " " + res.body());
             }
-            return res.body();
+            return new Result(res.body(), res.headers().firstValue("ETag").orElse(null));
         }
         throw new IllegalStateException("API 錯誤：token 無效");
     }
@@ -105,6 +115,11 @@ public class DashboardTW {
         DashboardTW api = new DashboardTW(base,
                 System.getenv("DASHBOARD_TW_CLIENT_ID"),
                 System.getenv("DASHBOARD_TW_CLIENT_SECRET"));
-        System.out.println(api.get("/datasets/aqi_obs/latest?county=63000"));
+        Result first = api.get("/datasets/aqi_obs/latest?county=63000", null);
+        System.out.println(first.body());
+
+        // 定時查詢時帶上上次的 ETag，資料沒變會回應 304，不算流量
+        Result again = api.get("/datasets/aqi_obs/latest?county=63000", first.etag());
+        System.out.println(again.body() == null ? "資料沒有變動（304）" : "資料已更新");
     }
 }
